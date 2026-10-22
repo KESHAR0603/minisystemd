@@ -1,0 +1,4 @@
+[Service]
+Name=test_worker
+ExecStart=sleep 2
+Restart=on-failure

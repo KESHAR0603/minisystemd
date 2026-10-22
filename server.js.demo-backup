@@ -1,0 +1,280 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { spawn, execFile } = require('child_process');
+
+const app = express();
+const PORT = 3000;
+const ROOT = __dirname;
+const SERVICES_DIR = path.join(ROOT, 'services');
+
+let daemonProcess = null;
+let logs = [];
+
+function addLog(message) {
+    const entry = {
+        time: new Date().toLocaleTimeString(),
+        message: String(message).trimEnd()
+    };
+    logs.push(entry);
+    if (logs.length > 250) logs = logs.slice(-250);
+    console.log(`[${entry.time}] ${entry.message}`);
+}
+
+function readServices() {
+    try {
+        return fs.readdirSync(SERVICES_DIR)
+            .filter(file => file.endsWith('.service'))
+            .sort()
+            .map(file => ({
+                file,
+                content: fs.readFileSync(path.join(SERVICES_DIR, file), 'utf8')
+            }));
+    } catch (error) {
+        return [];
+    }
+}
+
+const page = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniSystemd | Control Center</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#121a2d;--line:#26334c;--text:#e9efff;--muted:#8c9bb8;--blue:#70a5ff;--green:#4cdb9b;--orange:#ffbd69}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at top,#172749 0%,var(--bg) 48%);color:var(--text);font:15px system-ui,Segoe UI,sans-serif;min-height:100vh}
+header{padding:28px 5%;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{display:flex;gap:14px;align-items:center}.logo{width:45px;height:45px;border-radius:13px;background:#233d70;display:grid;place-items:center;font-size:24px}
+h1{font-size:23px;margin:0}.sub{color:var(--muted);margin-top:4px;font-size:13px}
+main{max-width:1400px;margin:auto;padding:26px 5% 45px}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+button{border:1px solid var(--line);background:#1a2741;color:var(--text);border-radius:9px;padding:11px 16px;font-weight:650;cursor:pointer}
+button:hover{filter:brightness(1.2)}button.primary{background:#326ee5;border-color:#528bff}button:disabled{opacity:.55;cursor:wait}
+.notice{margin:18px 0;padding:13px 16px;border:1px solid #354866;border-radius:10px;color:#b9c9e8;background:#111d32;font-size:13px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px;margin:20px 0}
+.card,.panel{background:linear-gradient(145deg,#151f34,#101728);border:1px solid var(--line);border-radius:14px;padding:20px;min-width:0}
+.stat-label{font-size:13px;color:var(--muted)}.stat-value{font-size:27px;font-weight:750;margin-top:8px;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:18px}
+.panel h2{font-size:16px;margin:0 0 17px}.service{border:1px solid var(--line);background:#10182a;padding:14px;border-radius:10px;margin:10px 0}
+.service-title{font-weight:700;overflow-wrap:anywhere}.file{font-size:12px;color:var(--muted);margin-top:4px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:190px;overflow:auto;background:#090e18;padding:12px;border-radius:8px;color:#a9caff;font-size:12px}
+#logs{height:355px;max-height:55vh;overflow:auto;background:#070b12;border:1px solid #1c2b40;border-radius:10px;padding:13px;font:12px/1.8 ui-monospace,Consolas,monospace}
+.logline{white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid #172135;padding:4px 0}.time{color:#7185a8;margin-right:8px}.empty{color:var(--muted);padding:18px 0}
+footer{color:var(--muted);font-size:12px;margin-top:22px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.stats{grid-template-columns:1fr}.stat-value{font-size:23px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo">⚡</div><div><h1>MiniSystemd</h1><div class="sub">Linux service supervision · C backend · Express control plane</div></div></div>
+  <div class="actions">
+    <button class="primary" id="boot" onclick="bootDaemon()">▶ Boot daemon</button>
+    <button onclick="checkStatus()">↻ Check status</button>
+    <button onclick="loadServices()">Refresh units</button>
+  </div>
+</header>
+<main>
+  <div class="notice">Live local dashboard. Service definitions and daemon output are read from your project. Per-service running states are not currently exposed by the C IPC protocol.</div>
+  <section class="stats">
+    <div class="card"><div class="stat-label">DAEMON CONNECTION</div><div class="stat-value" id="daemonState">Checking…</div></div>
+    <div class="card"><div class="stat-label">UNIT FILES DISCOVERED</div><div class="stat-value" id="unitCount">—</div></div>
+    <div class="card"><div class="stat-label">LATEST ACTIVE COUNT</div><div class="stat-value" id="activeCount">—</div></div>
+  </section>
+  <section class="grid">
+    <div class="panel">
+      <h2>▤ Service unit files</h2>
+      <div id="services"><div class="empty">Loading service definitions…</div></div>
+    </div>
+    <div class="panel">
+      <h2>▣ Daemon execution log</h2>
+      <div class="actions" style="margin-bottom:12px">
+        <button onclick="loadLogs()">Refresh logs</button>
+        <button onclick="clearLogs()">Clear display</button>
+      </div>
+      <div id="logs"><div class="empty">Waiting for daemon output. Click “Boot daemon” to start your C program.</div></div>
+    </div>
+  </section>
+  <footer>MiniSystemd local control plane · Data comes from the local project and minictl IPC response.</footer>
+</main>
+<script>
+let displayCleared = false;
+
+async function api(url, options) {
+  const response = await fetch(url, options || {});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function loadServices() {
+  const target = document.getElementById('services');
+  try {
+    const data = await api('/api/services');
+    document.getElementById('unitCount').textContent = data.services.length;
+    target.replaceChildren();
+    if (!data.services.length) {
+      target.innerHTML = '<div class="empty">No .service files found in services/.</div>';
+      return;
+    }
+    for (const service of data.services) {
+      const card = document.createElement('div');
+      card.className = 'service';
+      const title = document.createElement('div');
+      title.className = 'service-title';
+      title.textContent = service.file;
+      const file = document.createElement('div');
+      file.className = 'file';
+      file.textContent = 'Actual file: services/' + service.file;
+      const pre = document.createElement('pre');
+      pre.textContent = service.content;
+      card.append(title, file, pre);
+      target.appendChild(card);
+    }
+  } catch (error) {
+    target.textContent = 'Could not load service files: ' + error.message;
+  }
+}
+
+async function checkStatus() {
+  try {
+    const data = await api('/api/status');
+    document.getElementById('daemonState').textContent =
+      data.running ? 'Connected' : 'Not running';
+    document.getElementById('activeCount').textContent =
+      data.activeCount === null ? 'Unavailable' : data.activeCount;
+  } catch (error) {
+    document.getElementById('daemonState').textContent = 'Unavailable';
+    document.getElementById('activeCount').textContent = '—';
+  }
+}
+
+async function bootDaemon() {
+  const button = document.getElementById('boot');
+  button.disabled = true;
+  button.textContent = 'Starting…';
+  try {
+    const data = await api('/api/run', {method:'POST'});
+    if (data.message) console.log(data.message);
+    await loadLogs();
+    await checkStatus();
+  } catch (error) {
+    alert('Could not start MiniSystemd: ' + error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = '▶ Boot daemon';
+  }
+}
+
+async function loadLogs() {
+  if (displayCleared) return;
+  try {
+    const data = await api('/api/logs');
+    const box = document.getElementById('logs');
+    box.replaceChildren();
+    if (!data.logs.length) {
+      box.innerHTML = '<div class="empty">No output captured yet.</div>';
+      return;
+    }
+    for (const entry of data.logs) {
+      const line = document.createElement('div');
+      line.className = 'logline';
+      const time = document.createElement('span');
+      time.className = 'time';
+      time.textContent = '[' + entry.time + ']';
+      const message = document.createElement('span');
+      message.textContent = entry.message;
+      line.append(time, message);
+      box.appendChild(line);
+    }
+    box.scrollTop = box.scrollHeight;
+  } catch (error) {}
+}
+
+function clearLogs() {
+  displayCleared = true;
+  document.getElementById('logs').innerHTML = '<div class="empty">Log display cleared. Capturing continues on the server.</div>';
+  setTimeout(() => { displayCleared = false; loadLogs(); }, 5000);
+}
+
+loadServices();
+checkStatus();
+loadLogs();
+setInterval(() => { loadLogs(); checkStatus(); }, 1500);
+</script>
+</body>
+</html>`;
+
+app.get('/', (req, res) => res.send(page));
+
+app.get('/api/services', (req, res) => {
+    res.json({ services: readServices() });
+});
+
+app.get('/api/logs', (req, res) => {
+    res.json({ logs });
+});
+
+app.get('/api/status', (req, res) => {
+    execFile('./minictl', ['status'], {
+        cwd: ROOT,
+        timeout: 2000
+    }, (error, stdout, stderr) => {
+        const message = (stdout || stderr || '').trim();
+        const match = message.match(/Active services count\\s*=\\s*(\\d+)/i);
+        res.json({
+            running: !error && message.includes('OK:'),
+            activeCount: match ? Number(match[1]) : null,
+            message: message || (error ? 'Daemon is not responding to minictl.' : '')
+        });
+    });
+});
+
+app.post('/api/run', (req, res) => {
+    if (daemonProcess && daemonProcess.exitCode === null) {
+        return res.status(409).json({
+            error: 'The daemon was already started from this dashboard.'
+        });
+    }
+
+    addLog('Request received: starting the real C daemon.');
+    addLog('Command: ./minisystemd');
+
+    let child;
+    try {
+        child = spawn('stdbuf', ['-oL', '-eL', './minisystemd'], {
+            cwd: ROOT,
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+    } catch (error) {
+        addLog('Could not start daemon: ' + error.message);
+        return res.status(500).json({ error: error.message });
+    }
+
+    daemonProcess = child;
+
+    child.stdout.on('data', chunk => {
+        chunk.toString().split(/\r?\n/).filter(Boolean).forEach(addLog);
+    });
+
+    child.stderr.on('data', chunk => {
+        chunk.toString().split(/\r?\n/).filter(Boolean)
+            .forEach(line => addLog('[stderr] ' + line));
+    });
+
+    child.on('error', error => {
+        addLog('Process launch error: ' + error.message);
+    });
+
+    child.on('close', (code, signal) => {
+        addLog('Daemon process ended. Exit code: ' + code + ', signal: ' + signal);
+        if (daemonProcess === child) daemonProcess = null;
+    });
+
+    res.json({ message: 'Daemon launch requested. Output will appear in the log panel.' });
+});
+
+app.listen(PORT, '127.0.0.1', () => {
+    console.log('MiniSystemd dashboard running at http://localhost:' + PORT);
+});

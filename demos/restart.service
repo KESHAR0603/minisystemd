@@ -1,0 +1,4 @@
+[Service]
+Name=demo_restart
+ExecStart=false
+Restart=on-failure

@@ -1,0 +1,22 @@
+# Compiled executables
+minisystemd
+minictl
+
+# Python virtual environment and cache
+venv/
+__pycache__/
+*.py[cod]
+
+# Node.js dependencies
+node_modules/
+
+# Environment secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# Editor and OS files
+.vscode/
+.DS_Store

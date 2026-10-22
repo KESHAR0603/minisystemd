@@ -1,0 +1,7 @@
+[Unit]
+Description=Faulty Worker Service
+
+[Service]
+Name=test_worker
+ExecStart=ls /nonexistent_folder
+Restart=on-failure

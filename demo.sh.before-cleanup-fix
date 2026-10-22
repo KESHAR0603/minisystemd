@@ -1,0 +1,63 @@
+#!/bin/bash
+
+set -u
+cd "$(dirname "$0")"
+
+if pgrep -x minisystemd >/dev/null; then
+    echo "ERROR: MiniSystemd is already running. Stop it before running a demo."
+    exit 1
+fi
+
+if [ ! -x ./minisystemd ]; then
+    echo "ERROR: minisystemd binary not found. Compile it first."
+    exit 1
+fi
+
+FEATURE="${1:-}"
+BACKUP_DIR="$(mktemp -d)"
+mkdir -p "$BACKUP_DIR/services"
+cp -a services/. "$BACKUP_DIR/services/" 2>/dev/null || true
+
+restore_services() {
+    find services -maxdepth 1 -type f -name '*.service' -delete
+    cp -a "$BACKUP_DIR/services/." services/ 2>/dev/null || true
+    rm -rf "$BACKUP_DIR"
+    echo
+    echo "Original service files restored."
+}
+trap restore_services EXIT INT TERM
+
+mkdir -p services
+find services -maxdepth 1 -type f -name '*.service' -delete
+
+case "$FEATURE" in
+    reaping)
+        cp test.service services/
+        echo "DEMO: Process supervision and zombie reaping"
+        ;;
+    dependency)
+        cp demos/dependency-a.service services/
+        cp demos/dependency-b.service services/
+        echo "DEMO: Dependency ordering (demo_a before demo_b)"
+        ;;
+    circular)
+        cp demos/circular-a.service services/
+        cp demos/circular-b.service services/
+        echo "DEMO: Circular dependency detection"
+        ;;
+    restart)
+        cp demos/restart.service services/
+        echo "DEMO: Automatic restart after failure"
+        ;;
+    *)
+        echo "Usage: ./demo.sh {reaping|dependency|circular|restart}"
+        exit 2
+        ;;
+esac
+
+echo "----------------------------------------"
+stdbuf -oL -eL ./minisystemd
+RESULT=$?
+echo "----------------------------------------"
+echo "Demo process finished with exit code: $RESULT"
+exit 0
